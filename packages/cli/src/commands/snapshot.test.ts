@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
-import { findFFmpeg } from "../browser/ffmpeg.js";
+import { findFFmpeg, findFFprobe } from "../browser/ffmpeg.js";
 import { sourceTimeAt } from "@hyperframes/core";
 
 const snapshotState = vi.hoisted(() => ({
@@ -32,6 +32,7 @@ vi.mock("../utils/staticProjectServer.js", () => ({
 
 import snapshotCommand, {
   extractVideoFrameToBuffer,
+  containingSourceFrameIndex,
   computeSnapshotTimes,
   formatSnapshotTimestamp,
   parseZoomScale,
@@ -90,12 +91,8 @@ describe("transparent snapshot capture", () => {
   it("pairs every frame with the frame-exact reference frame under --against", () => {
     const source = readFileSync(new URL("./snapshot.ts", import.meta.url), "utf8");
     expect(source).toContain("against: {");
-    expect(source).toContain("extractVideoFrameToBuffer(opts.against, time, false, true)");
+    expect(source).toContain("extractVideoFrameToBuffer(opts.against, time)");
     expect(source).toContain('labels: ["render", "reference"]');
-    // accurate seek = `-ss` after `-i`, never the keyframe-snap fast path
-    expect(source).toContain(
-      'accurateSeek ? ["-i", videoPath, ...seek] : [...seek, "-i", videoPath]',
-    );
   });
 
   it("resolves and forwards the shared local browser GPU policy", () => {
@@ -347,10 +344,127 @@ describe("resolveSnapshotVideoFrameTime", () => {
   });
 });
 
+describe("containingSourceFrameIndex", () => {
+  it.each([
+    [0.4, 9],
+    [22 / 30, 17],
+    [10 / 30, 8],
+    [4.1, 98],
+  ])("selects frame %s on the source presentation grid", (time, expected) => {
+    expect(
+      containingSourceFrameIndex(
+        Array.from({ length: 120 }, (_, n) => n / 24),
+        time,
+      ),
+    ).toBe(expected);
+  });
+  it("keeps exact boundaries despite floating-point round-off", () => {
+    expect(containingSourceFrameIndex([0, 4.1], 4.1 - 4 * Number.EPSILON)).toBe(1);
+    expect(containingSourceFrameIndex([0, 4.1], 4.1 - 0.00001)).toBe(0);
+  });
+  it("uses irregular presentation intervals", () => {
+    expect(containingSourceFrameIndex([0, 0.02, 0.08, 0.15], 0.07)).toBe(1);
+    expect(containingSourceFrameIndex([0, 0.02, 0.08, 0.15], 0.08)).toBe(2);
+  });
+});
+
 describe("extractVideoFrameToBuffer", () => {
   const ffmpeg = findFFmpeg();
+  const ffprobe = findFFprobe();
 
-  it.skipIf(!ffmpeg)(
+  it.skipIf(!ffmpeg || !ffprobe)(
+    "selects containing frames for snapshots and reference pairs",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "hf-snapshot-containing-"));
+      try {
+        const clip = join(dir, "clip.mp4");
+        execFileSync(ffmpeg!, [
+          "-hide_banner",
+          "-loglevel",
+          "error",
+          "-f",
+          "lavfi",
+          "-i",
+          "testsrc=d=2:r=24:s=160x90",
+          "-pix_fmt",
+          "yuv420p",
+          clip,
+        ]);
+        for (const [time, index] of [
+          [0.4, 9],
+          [22 / 30, 17],
+          [10 / 30, 8],
+          [9 / 24, 9],
+        ] as const) {
+          const expected = join(dir, `frame-${index}.png`);
+          execFileSync(ffmpeg!, [
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            clip,
+            "-vf",
+            `select=eq(n\\,${index})`,
+            "-frames:v",
+            "1",
+            "-y",
+            expected,
+          ]);
+          const actual = await extractVideoFrameToBuffer(clip, time);
+          expect(actual?.equals(readFileSync(expected))).toBe(true);
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!ffmpeg || !ffprobe)(
+    "selects a variable-frame-rate presentation interval",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "hf-snapshot-vfr-"));
+      try {
+        const clip = join(dir, "clip.mp4");
+        execFileSync(ffmpeg!, [
+          "-hide_banner",
+          "-loglevel",
+          "error",
+          "-f",
+          "lavfi",
+          "-i",
+          "testsrc=d=1:r=10:s=160x90",
+          "-vf",
+          "select=eq(n\\,0)+eq(n\\,1)+eq(n\\,4)+eq(n\\,8)",
+          "-fps_mode",
+          "vfr",
+          "-pix_fmt",
+          "yuv420p",
+          clip,
+        ]);
+        const expected = join(dir, "frame.png");
+        execFileSync(ffmpeg!, [
+          "-hide_banner",
+          "-loglevel",
+          "error",
+          "-i",
+          clip,
+          "-vf",
+          "select=eq(n\\,1)",
+          "-frames:v",
+          "1",
+          "-y",
+          expected,
+        ]);
+        expect((await extractVideoFrameToBuffer(clip, 0.3))?.equals(readFileSync(expected))).toBe(
+          true,
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!ffmpeg || !ffprobe)(
     "gives a 24 fps clip's real last frame for a held tail that lands past it",
     async () => {
       const dir = mkdtempSync(join(tmpdir(), "hf-snapshot-tail-"));
@@ -359,10 +473,10 @@ describe("extractVideoFrameToBuffer", () => {
         const source = ["-f", "lavfi", "-i", "testsrc=d=1:r=24:s=160x90", "-pix_fmt", "yuv420p"];
         execFileSync(ffmpeg!, ["-hide_banner", "-loglevel", "error", ...source, clip]);
 
-        const held = await extractVideoFrameToBuffer(clip, 1 - 1 / 30, false, false, true);
-        const lastFrame = await extractVideoFrameToBuffer(clip, 23 / 24, false, true);
+        const held = await extractVideoFrameToBuffer(clip, 1 - 1 / 30, false, true);
+        const lastFrame = await extractVideoFrameToBuffer(clip, 23 / 24);
 
-        expect(await extractVideoFrameToBuffer(clip, 1 - 1 / 30)).toBeNull();
+        expect((await extractVideoFrameToBuffer(clip, 1 - 1 / 30))?.equals(lastFrame!)).toBe(true);
         expect(lastFrame).not.toBeNull();
         expect(held?.equals(lastFrame!)).toBe(true);
       } finally {

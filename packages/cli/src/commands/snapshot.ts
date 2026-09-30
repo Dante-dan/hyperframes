@@ -32,7 +32,8 @@ import { formatLintFindings } from "../utils/lintFormat.js";
 import { normalizeErrorMessage } from "../utils/errorMessage.js";
 import { serveStaticProjectHtml } from "../utils/staticProjectServer.js";
 import { c } from "../ui/colors.js";
-import { findFFmpeg, getFFmpegInstallHint } from "../browser/ffmpeg.js";
+import { runCancellableProcess } from "../utils/cancellableProcess.js";
+import { findFFmpeg, findFFprobe, getFFmpegInstallHint } from "../browser/ffmpeg.js";
 import { parseAngle, type Camera } from "./motionShotLayout.js";
 import type { Example } from "./_examples.js";
 import { loadOptionalPackage } from "../utils/optionalPackages.js";
@@ -176,51 +177,123 @@ export async function recaptureSnapshotComposite(page: SnapshotCompositePage): P
   }
 }
 
-/**
- * Extract a single frame from a video file at `timeSeconds` via FFmpeg.
- * Used to work around Chrome-headless's inability to reliably seek
- * <video> elements during snapshot capture.
- */
+export function containingSourceFrameIndex(timestamps: readonly number[], time: number): number {
+  if (!Number.isFinite(time)) return -1;
+  const tolerance = 16 * Number.EPSILON * Math.max(1, Math.abs(time));
+  let index = -1;
+  for (const [i, timestamp] of timestamps.entries()) {
+    if (timestamp > time + tolerance) break;
+    index = i;
+  }
+  return index;
+}
+
+async function probeContainingSourceFrame(
+  videoPath: string,
+  time: number,
+  holdLastFrame: boolean,
+): Promise<number> {
+  const ffprobe = findFFprobe();
+  if (!ffprobe)
+    throw new Error(`FFprobe is required for snapshot frame selection. ${getFFmpegInstallHint()}`);
+  const { stdout } = await runCancellableProcess(
+    ffprobe,
+    [
+      "-v",
+      "error",
+      "-select_streams",
+      "v:0",
+      "-read_intervals",
+      `%+${time + 1}`,
+      "-show_frames",
+      "-show_entries",
+      "frame=best_effort_timestamp:stream=time_base:format=start_time,duration",
+      "-of",
+      "json",
+      videoPath,
+    ],
+    { timeoutMs: FFMPEG_EXTRACT_TIMEOUT_MS, maxBufferBytes: 32 * 1024 * 1024 },
+  );
+  const data: unknown = JSON.parse(stdout);
+  if (
+    typeof data !== "object" ||
+    data === null ||
+    !("frames" in data) ||
+    !Array.isArray(data.frames) ||
+    !("streams" in data) ||
+    !Array.isArray(data.streams)
+  )
+    return -1;
+  const stream: unknown = data.streams[0];
+  if (
+    typeof stream !== "object" ||
+    stream === null ||
+    !("time_base" in stream) ||
+    typeof stream.time_base !== "string"
+  )
+    return -1;
+  const [numerator, denominator] = stream.time_base.split("/");
+  const timeBase = Number(numerator) / Number(denominator);
+  if (!Number.isFinite(timeBase) || timeBase <= 0) return -1;
+  const format = "format" in data ? data.format : null;
+  const start =
+    typeof format === "object" && format !== null && "start_time" in format
+      ? Number(format.start_time)
+      : 0;
+  const duration =
+    typeof format === "object" && format !== null && "duration" in format
+      ? Number(format.duration)
+      : NaN;
+  if (!holdLastFrame && Number.isFinite(duration) && time >= duration) return -1;
+  const timestamps: number[] = [];
+  for (const frame of data.frames) {
+    if (
+      typeof frame !== "object" ||
+      frame === null ||
+      !("best_effort_timestamp" in frame) ||
+      typeof frame.best_effort_timestamp !== "number"
+    )
+      return -1;
+    timestamps.push(frame.best_effort_timestamp * timeBase - (Number.isFinite(start) ? start : 0));
+  }
+  return containingSourceFrameIndex(timestamps, time);
+}
+
 export async function extractVideoFrameToBuffer(
   videoPath: string,
   timeSeconds: number,
   useVp9AlphaDecoder = false,
-  accurateSeek = false,
   holdLastFrame = false,
 ): Promise<Buffer | null> {
   const tmp = mkdtempSync(join(tmpdir(), "hf-snapshot-frame-"));
   const outPath = join(tmp, "frame.png");
   try {
     const ffmpegPath = requireSnapshotFfmpeg(findFFmpeg());
-    // `-ss` before `-i` performs a fast keyframe seek; adequate for snapshot accuracy
-    // (±1 frame) and orders of magnitude faster than the decode-and-scan alternative.
-    // `accurateSeek` puts `-ss` after `-i` (decode from the start) for frame-exact
-    // reference pairs, where ±1 frame would read as a real mismatch.
+    const frameIndex = await probeContainingSourceFrame(
+      videoPath,
+      Math.max(0, timeSeconds),
+      holdLastFrame,
+    );
+    if (frameIndex < 0) return null;
     const args = ["-hide_banner", "-loglevel", "error"];
-    if (useVp9AlphaDecoder) {
-      args.push("-c:v", "libvpx-vp9");
-    }
-    const decoderArgs = [...args];
-    const seek = ["-ss", String(Math.max(0, timeSeconds))];
+    if (useVp9AlphaDecoder) args.push("-c:v", "libvpx-vp9");
     args.push(
-      ...(accurateSeek ? ["-i", videoPath, ...seek] : [...seek, "-i", videoPath]),
+      "-i",
+      videoPath,
+      "-map",
+      "0:v:0",
+      "-vf",
+      `select=eq(n\\,${frameIndex})`,
       "-frames:v",
       "1",
+      "-fps_mode",
+      "passthrough",
       "-q:v",
       "2",
       "-y",
       outPath,
     );
-    let result = await runFfmpegOnce(ffmpegPath, args, FFMPEG_EXTRACT_TIMEOUT_MS);
-    if (holdLastFrame && result.code === 0 && !result.timedOut && !existsSync(outPath)) {
-      // Past the last frame's timestamp FFmpeg writes nothing; decode the final second and keep its last frame.
-      const tail = ["-sseof", "-1", "-i", videoPath, "-update", "1", "-q:v", "2", "-y", outPath];
-      result = await runFfmpegOnce(
-        ffmpegPath,
-        [...decoderArgs, ...tail],
-        FFMPEG_EXTRACT_TIMEOUT_MS,
-      );
-    }
+    const result = await runFfmpegOnce(ffmpegPath, args, FFMPEG_EXTRACT_TIMEOUT_MS);
     if (result.code !== 0 || result.timedOut || !existsSync(outPath)) return null;
     return readFileSync(outPath);
   } finally {
@@ -599,7 +672,6 @@ async function captureSnapshots(
               ffmpegInput,
               Math.max(0, v.relTime),
               useVp9AlphaDecoder,
-              false,
               v.srcDuration > 0 && v.relTime >= v.srcDuration - 1,
             );
             if (!png) continue;
@@ -665,7 +737,7 @@ async function captureSnapshots(
         if (opts.against) {
           // Frame-exact reference frame beside the render, so a rebuild can be
           // checked against its footage without hand-rolled ffmpeg + montage.
-          const refPng = await extractVideoFrameToBuffer(opts.against, time, false, true);
+          const refPng = await extractVideoFrameToBuffer(opts.against, time);
           if (!refPng) {
             console.error(
               `   ${c.warn("⚠")} --against has no frame at ${timeLabel} — reference pair skipped`,
