@@ -595,6 +595,30 @@ async function captureSnapshots(
           }
         }
 
+        const hasPageComposite = await page.evaluate(async () => {
+          const runtimeWindow = window as Window & {
+            __hf_page_composite_prepare?: () => Promise<boolean>;
+            __hf_page_composite_resolve?: () => boolean;
+          };
+          if (typeof runtimeWindow.__hf_page_composite_resolve !== "function") return false;
+          await runtimeWindow.__hf_page_composite_prepare?.();
+          return true;
+        });
+        if (hasPageComposite) {
+          // Capture paint records after decoded video overlays replace the native videos.
+          await page.screenshot({
+            type: "jpeg",
+            quality: 1,
+            clip: { x: 0, y: 0, width: 1, height: 1 },
+          });
+          await page.evaluate(() => {
+            const runtimeWindow = window as Window & {
+              __hf_page_composite_resolve?: () => boolean;
+            };
+            runtimeWindow.__hf_page_composite_resolve?.();
+          });
+        }
+
         const timeLabel = formatSnapshotTimestamp(time);
         const index = String(i).padStart(2, "0");
         const filename = `frame-${index}-at-${timeLabel}.png`;
