@@ -195,8 +195,8 @@ async function probeContainingSourceFrameSeek(
   holdLastFrame: boolean,
 ): Promise<{ seek: number; select: number } | null> {
   const ffprobe = findFFprobe();
-  if (!ffprobe)
-    throw new Error(`FFprobe is required for snapshot frame selection. ${getFFmpegInstallHint()}`);
+  // Without ffprobe, fall back to a plain seek: the first frame at or after `time`.
+  if (!ffprobe) return { seek: time, select: 0 };
   // Packet timestamps need no decode, so a late sample costs a demux, not a decode from the start.
   let data: unknown;
   try {
@@ -269,12 +269,13 @@ async function probeContainingSourceFrameSeek(
   if (index < 0) return null;
   const frame = timestamps[index]!;
   const previous = timestamps[index - 1] ?? frame - 0.001;
-  // Demuxers seek by dts (fragmented MP4) or imprecisely (MPEG-TS), so seek to the keyframe
-  // that starts the frame's decode and pick the frame by its decoded time instead.
+  // Demuxers seek by dts (fragmented MP4) or imprecisely (MPEG-TS), so seek to the last keyframe
+  // at or before the frame in both orders (open-GOP leading frames precede their keyframe)
+  // and pick the frame by its decoded time.
   let seek = 0;
   for (let i = packets.findIndex((packet) => packet.pts === frame); i >= 0; i--) {
     const packet = packets[i]!;
-    if (!packet.key) continue;
+    if (!packet.key || packet.pts > frame) continue;
     seek = Math.max(0, Math.min(packet.pts, packet.dts));
     break;
   }

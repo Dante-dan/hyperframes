@@ -468,6 +468,7 @@ describe("extractVideoFrameToBuffer", () => {
     ["fragmented MP4", "clip.mp4", ["-movflags", "frag_keyframe+empty_moov"]],
     ["MPEG-TS", "clip.ts", []],
     ["MP4", "clip.mp4", []],
+    ["open-GOP MPEG-TS", "clip.ts", ["-x264-params", "open-gop=1"]],
   ])("matches a full decode past keyframes in %s with B-frames", async (_, name, muxArgs) => {
     const dir = mkdtempSync(join(tmpdir(), "hf-snapshot-gop-"));
     try {
@@ -475,7 +476,7 @@ describe("extractVideoFrameToBuffer", () => {
       const quiet = ["-hide_banner", "-loglevel", "error"];
       execFileSync(ffmpeg!, [
         ...quiet,
-        ...["-f", "lavfi", "-i", "testsrc=d=3:r=30:s=160x90", "-pix_fmt", "yuv420p"],
+        ...["-f", "lavfi", "-i", "testsrc2=d=3:r=30:s=160x90", "-pix_fmt", "yuv420p"],
         ...["-c:v", "libx264", "-bf", "3", "-g", "30", "-keyint_min", "30", "-sc_threshold", "0"],
         ...muxArgs,
         clip,
@@ -509,6 +510,29 @@ describe("extractVideoFrameToBuffer", () => {
       }
     },
   );
+
+  it.skipIf(!ffmpeg)("extracts without ffprobe, as before frame selection needed it", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "hf-snapshot-no-ffprobe-"));
+    vi.stubEnv("HYPERFRAMES_FFPROBE_PATH", join(dir, "missing-ffprobe"));
+    try {
+      const clip = join(dir, "clip.mp4");
+      execFileSync(ffmpeg!, [
+        ...["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=d=1:r=24:s=160x90"],
+        ...["-pix_fmt", "yuv420p", clip],
+      ]);
+      const expected = join(dir, "frame.png");
+      execFileSync(ffmpeg!, [
+        ...["-hide_banner", "-loglevel", "error", "-i", clip, "-vf", "select=eq(n\\,12)"],
+        ...["-frames:v", "1", "-y", expected],
+      ]);
+      expect((await extractVideoFrameToBuffer(clip, 0.5))?.equals(readFileSync(expected))).toBe(
+        true,
+      );
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
   it.skipIf(!ffmpeg || !ffprobe)(
     "gives a 24 fps clip's real last frame for a held tail that lands past it",
