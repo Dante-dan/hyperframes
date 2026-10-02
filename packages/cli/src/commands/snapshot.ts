@@ -268,23 +268,51 @@ async function probeContainingSourceFrameSeek(
   if (timestamps.length === 0 || !Number.isFinite(time)) return null;
   const frame = timestamps[index]!;
   const previous = timestamps[index - 1] ?? frame - 0.001;
-  // Demuxers seek by dts (fragmented MP4) or imprecisely (MPEG-TS), so seek to the last keyframe
-  // at or before the frame in both orders (open-GOP leading frames precede their keyframe)
-  // and pick the frame by its decoded time.
-  let seek = 0;
-  let keyframe: number | undefined;
-  for (let i = packets.findIndex((packet) => packet.pts === frame); i >= 0; i--) {
-    const packet = packets[i]!;
-    if (!packet.key || packet.pts > frame) continue;
-    seek = Math.max(0, packet.pts);
-    keyframe = packet.pts;
-    break;
+  const mid = (previous + frame) / 2;
+  // Demuxers land on a keyframe of their choosing (MPEG-TS often a later one), so observe where a
+  // seek lands; a seek to exactly that keyframe trims its leading frames, so it is `start_t`.
+  const ffmpeg = findFFmpeg();
+  const landing = async (seek: number) => {
+    const raw = ffmpeg ? await probeSeekLanding(ffmpeg, videoPath, seek) : null;
+    return raw === null ? null : raw - startTicks * timeBase;
+  };
+  const candidates = packets.filter(
+    (packet) => packet.key && packet.pts > 0 && packet.pts <= frame,
+  );
+  for (const candidate of candidates.reverse().slice(0, 3)) {
+    const landed = await landing(candidate.pts);
+    if (landed === null) break;
+    if (landed <= 0 || landed > frame) continue;
+    const again = Math.abs(landed - candidate.pts) < 1e-6 ? landed : await landing(landed);
+    if (again !== null && Math.abs(again - landed) < 1e-6)
+      return { seek: landed, select: mid - landed };
   }
-  // Where FFmpeg puts zero varies by container, so measure from the first frame the filter gets
-  // (`start_t`): the keyframe after a seek, else the first frame at or after the file start.
-  const first =
-    seek > 0 && keyframe !== undefined ? keyframe : (timestamps.find((t) => t >= 0) ?? frame);
-  return { seek: seek > 0 ? seek : undefined, select: (previous + frame) / 2 - first };
+  // No seek: the first frame FFmpeg emits is the first one at or after the file start.
+  return { select: mid - (timestamps.find((t) => t >= 0) ?? frame) };
+}
+
+/** Raw stream time of the packet an input seek to `seek` lands on, read without decoding. */
+async function probeSeekLanding(
+  ffmpeg: string,
+  videoPath: string,
+  seek: number,
+): Promise<number | null> {
+  try {
+    const { stdout } = await runCancellableProcess(
+      ffmpeg,
+      [
+        ...["-v", "error", "-copyts", "-noaccurate_seek", "-ss", String(seek), "-i", videoPath],
+        ...["-map", "0:v:0", "-c", "copy", "-frames:v", "1", "-f", "framecrc", "-"],
+      ],
+      { timeoutMs: FFMPEG_EXTRACT_TIMEOUT_MS, maxBufferBytes: 1024 * 1024 },
+    );
+    const base = /^#tb 0: (\d+)\/(\d+)/m.exec(stdout);
+    const row = /^0,\s*-?\d+,\s*(-?\d+),/m.exec(stdout);
+    if (!base || !row) return null;
+    return (Number(row[1]) * Number(base[1])) / Number(base[2]);
+  } catch {
+    return null;
+  }
 }
 
 export async function extractVideoFrameToBuffer(

@@ -666,6 +666,37 @@ describe("extractVideoFrameToBuffer", () => {
     }
   });
 
+  it.skipIf(noProbe)("selects frames in a TS with frequent open-GOP keyframes", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "hf-snapshot-open-gop-"));
+    try {
+      // A seek to 0.5 s lands on the keyframe at 1 s here, so the frames between are never decoded.
+      const clip = join(dir, "clip.ts");
+      const quiet = ["-hide_banner", "-loglevel", "error"];
+      execFileSync(ffmpeg!, [
+        ...quiet,
+        ...["-f", "lavfi", "-i", "testsrc2=d=3:r=30:s=160x90", "-c:v", "libx264", "-g", "15"],
+        ...["-bf", "3", "-x264-params", "open-gop=1:scenecut=0", clip],
+      ]);
+      for (const [time, index] of [
+        [0.5, 15],
+        [0.51, 15],
+        [0.99, 29],
+        [1.5, 45],
+        [1.99, 59],
+      ] as const) {
+        const expected = join(dir, `frame-${index}.png`);
+        execFileSync(ffmpeg!, [
+          ...quiet,
+          ...["-i", clip, "-vf", `select=eq(n\\,${index})`, "-frames:v", "1", "-y", expected],
+        ]);
+        const actual = await extractVideoFrameToBuffer(clip, time);
+        expect(actual?.equals(readFileSync(expected)), `t=${time}`).toBe(true);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it.skipIf(!ffmpeg)("extracts without ffprobe, as before frame selection needed it", async () => {
     const dir = mkdtempSync(join(tmpdir(), "hf-snapshot-no-ffprobe-"));
     vi.stubEnv("HYPERFRAMES_FFPROBE_PATH", join(dir, "missing-ffprobe"));
