@@ -464,6 +464,52 @@ describe("extractVideoFrameToBuffer", () => {
     },
   );
 
+  it.skipIf(!ffmpeg || !ffprobe).each([
+    ["fragmented MP4", "clip.mp4", ["-movflags", "frag_keyframe+empty_moov"]],
+    ["MPEG-TS", "clip.ts", []],
+    ["MP4", "clip.mp4", []],
+  ])("matches a full decode past keyframes in %s with B-frames", async (_, name, muxArgs) => {
+    const dir = mkdtempSync(join(tmpdir(), "hf-snapshot-gop-"));
+    try {
+      const clip = join(dir, name);
+      const quiet = ["-hide_banner", "-loglevel", "error"];
+      execFileSync(ffmpeg!, [
+        ...quiet,
+        ...["-f", "lavfi", "-i", "testsrc=d=3:r=30:s=160x90", "-pix_fmt", "yuv420p"],
+        ...["-c:v", "libx264", "-bf", "3", "-g", "30", "-keyint_min", "30", "-sc_threshold", "0"],
+        ...muxArgs,
+        clip,
+      ]);
+      // Frames 29 and 59 sit just before a keyframe; 47 and 80 decode from a later keyframe.
+      for (const index of [29, 47, 59, 80]) {
+        const expected = join(dir, `frame-${index}.png`);
+        execFileSync(ffmpeg!, [
+          ...quiet,
+          ...["-i", clip, "-vf", `select=eq(n\\,${index})`, "-frames:v", "1", "-y", expected],
+        ]);
+        const actual = await extractVideoFrameToBuffer(clip, (index + 0.5) / 30);
+        expect(actual?.equals(readFileSync(expected)), `frame ${index}`).toBe(true);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(!ffmpeg || !ffprobe)(
+    "leaves an unreadable video blank instead of failing the snapshot",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "hf-snapshot-unreadable-"));
+      try {
+        const garbage = join(dir, "garbage.mp4");
+        writeFileSync(garbage, "not a video");
+        expect(await extractVideoFrameToBuffer(join(dir, "missing.mp4"), 1)).toBeNull();
+        expect(await extractVideoFrameToBuffer(garbage, 1)).toBeNull();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it.skipIf(!ffmpeg || !ffprobe)(
     "gives a 24 fps clip's real last frame for a held tail that lands past it",
     async () => {

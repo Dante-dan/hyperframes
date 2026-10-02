@@ -188,35 +188,41 @@ export function containingSourceFrameIndex(timestamps: readonly number[], time: 
   return index;
 }
 
-/** Seek time that lands FFmpeg's accurate `-ss` on the frame containing `time`, or null. */
+/** Keyframe seek plus the decoded-time threshold that selects the frame containing `time`, or null. */
 async function probeContainingSourceFrameSeek(
   videoPath: string,
   time: number,
   holdLastFrame: boolean,
-): Promise<number | null> {
+): Promise<{ seek: number; select: number } | null> {
   const ffprobe = findFFprobe();
   if (!ffprobe)
     throw new Error(`FFprobe is required for snapshot frame selection. ${getFFmpegInstallHint()}`);
   // Packet timestamps need no decode, so a late sample costs a demux, not a decode from the start.
-  const { stdout } = await runCancellableProcess(
-    ffprobe,
-    [
-      "-v",
-      "error",
-      "-select_streams",
-      "v:0",
-      "-read_intervals",
-      `%+${time + 1}`,
-      "-show_entries",
-      "packet=pts,dts:stream=time_base:format=start_time,duration",
-      "-of",
-      "json",
-      "--",
-      videoPath,
-    ],
-    { timeoutMs: FFMPEG_EXTRACT_TIMEOUT_MS, maxBufferBytes: 32 * 1024 * 1024 },
-  );
-  const data: unknown = JSON.parse(stdout);
+  let data: unknown;
+  try {
+    const { stdout } = await runCancellableProcess(
+      ffprobe,
+      [
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-read_intervals",
+        `%+${time + 1}`,
+        "-show_entries",
+        "packet=pts,dts,flags:stream=time_base:format=start_time,duration",
+        "-of",
+        "json",
+        "--",
+        videoPath,
+      ],
+      { timeoutMs: FFMPEG_EXTRACT_TIMEOUT_MS, maxBufferBytes: 32 * 1024 * 1024 },
+    );
+    data = JSON.parse(stdout);
+  } catch {
+    // An unreadable source blanks this one video, as a failed ffmpeg extraction does.
+    return null;
+  }
   if (
     typeof data !== "object" ||
     data === null ||
@@ -247,20 +253,32 @@ async function probeContainingSourceFrameSeek(
       ? Number(format.duration)
       : NaN;
   if (!holdLastFrame && Number.isFinite(duration) && time >= duration) return null;
-  const timestamps: number[] = [];
+  const offset = Number.isFinite(start) ? start : 0;
+  const packets: { pts: number; dts: number; key: boolean }[] = [];
   for (const packet of data.packets) {
     if (typeof packet !== "object" || packet === null) return null;
     const pts = "pts" in packet ? packet.pts : "dts" in packet ? packet.dts : undefined;
     if (typeof pts !== "number") return null;
-    timestamps.push(pts * timeBase - (Number.isFinite(start) ? start : 0));
+    const dts = "dts" in packet && typeof packet.dts === "number" ? packet.dts : pts;
+    const key = "flags" in packet && typeof packet.flags === "string" && packet.flags.includes("K");
+    packets.push({ pts: pts * timeBase - offset, dts: dts * timeBase - offset, key });
   }
   // Packets arrive in decode order; B-frames make that differ from presentation order.
-  timestamps.sort((a, b) => a - b);
+  const timestamps = packets.map((packet) => packet.pts).sort((a, b) => a - b);
   const index = containingSourceFrameIndex(timestamps, time);
   if (index < 0) return null;
   const frame = timestamps[index]!;
   const previous = timestamps[index - 1] ?? frame - 0.001;
-  return Math.max(0, (previous + frame) / 2);
+  // Demuxers seek by dts (fragmented MP4) or imprecisely (MPEG-TS), so seek to the keyframe
+  // that starts the frame's decode and pick the frame by its decoded time instead.
+  let seek = 0;
+  for (let i = packets.findIndex((packet) => packet.pts === frame); i >= 0; i--) {
+    const packet = packets[i]!;
+    if (!packet.key) continue;
+    seek = Math.max(0, Math.min(packet.pts, packet.dts));
+    break;
+  }
+  return { seek, select: (previous + frame) / 2 - seek };
 }
 
 export async function extractVideoFrameToBuffer(
@@ -273,22 +291,23 @@ export async function extractVideoFrameToBuffer(
   const outPath = join(tmp, "frame.png");
   try {
     const ffmpegPath = requireSnapshotFfmpeg(findFFmpeg());
-    const seekTime = await probeContainingSourceFrameSeek(
+    const seek = await probeContainingSourceFrameSeek(
       videoPath,
       Math.max(0, timeSeconds),
       holdLastFrame,
     );
-    if (seekTime === null) return null;
+    if (seek === null) return null;
     const args = ["-hide_banner", "-loglevel", "error"];
     if (useVp9AlphaDecoder) args.push("-c:v", "libvpx-vp9");
-    // Accurate input seek: decode from the prior keyframe, drop frames before the midpoint.
     args.push(
       "-ss",
-      String(seekTime),
+      String(seek.seek),
       "-i",
       videoPath,
       "-map",
       "0:v:0",
+      "-vf",
+      `select=gte(t\\,${seek.select})`,
       "-frames:v",
       "1",
       "-q:v",
