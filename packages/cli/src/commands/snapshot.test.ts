@@ -569,6 +569,58 @@ describe("extractVideoFrameToBuffer", () => {
     },
   );
 
+  it.skipIf(!ffmpeg || !ffprobe).each([
+    // Audio leads video by 23 ms in a TS mux: frame n sits at 0.0232 + n/30 on the file's clock.
+    [
+      "MPEG-TS with leading audio",
+      "clip.ts",
+      [],
+      [
+        [0, 0],
+        [0.01, 0],
+        [0.05, 0],
+        [0.1, 2],
+        [1, 29],
+      ],
+    ],
+    // Video starts 0.5 s after the audio, so earlier times hold the first frame.
+    [
+      "MP4 with late video",
+      "clip.mp4",
+      ["-vf", "setpts=PTS+0.5/TB", "-fps_mode", "passthrough"],
+      [
+        [0, 0],
+        [0.1, 0],
+        [0.55, 1],
+        [1, 15],
+      ],
+    ],
+  ] as const)("measures frame times on the file clock in %s", async (_, name, videoArgs, cases) => {
+    const dir = mkdtempSync(join(tmpdir(), "hf-snapshot-av-"));
+    try {
+      const clip = join(dir, name);
+      const quiet = ["-hide_banner", "-loglevel", "error"];
+      execFileSync(ffmpeg!, [
+        ...quiet,
+        ...["-f", "lavfi", "-i", "testsrc2=d=2:r=30:s=160x90", "-f", "lavfi", "-i", "sine=d=3"],
+        ...videoArgs,
+        ...["-c:v", "libx264", "-bf", "3", "-pix_fmt", "yuv420p", "-c:a", "aac", clip],
+      ]);
+      for (const [time, index] of cases) {
+        const expected = join(dir, `frame-${index}.png`);
+        execFileSync(ffmpeg!, [
+          ...quiet,
+          ...["-i", clip, "-map", "0:v:0", "-vf", `select=eq(n\\,${index})`],
+          ...["-frames:v", "1", "-y", expected],
+        ]);
+        const actual = await extractVideoFrameToBuffer(clip, time);
+        expect(actual?.equals(readFileSync(expected)), `t=${time}`).toBe(true);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it.skipIf(!ffmpeg)("extracts without ffprobe, as before frame selection needed it", async () => {
     const dir = mkdtempSync(join(tmpdir(), "hf-snapshot-no-ffprobe-"));
     vi.stubEnv("HYPERFRAMES_FFPROBE_PATH", join(dir, "missing-ffprobe"));

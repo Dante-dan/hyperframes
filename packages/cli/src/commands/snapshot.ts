@@ -263,8 +263,9 @@ async function probeContainingSourceFrameSeek(
   }
   // Packets arrive in decode order; B-frames make that differ from presentation order.
   const timestamps = packets.map((packet) => packet.pts).sort((a, b) => a - b);
-  const index = containingSourceFrameIndex(timestamps, time);
-  if (index < 0) return null;
+  // Before the video's first frame (audio leads it), hold that frame, as the engine does.
+  const index = Math.max(0, containingSourceFrameIndex(timestamps, time));
+  if (timestamps.length === 0 || !Number.isFinite(time)) return null;
   const frame = timestamps[index]!;
   const previous = timestamps[index - 1] ?? frame - 0.001;
   // Demuxers seek by dts (fragmented MP4) or imprecisely (MPEG-TS), so seek to the last keyframe
@@ -277,7 +278,8 @@ async function probeContainingSourceFrameSeek(
     seek = Math.max(0, Math.min(packet.pts, packet.dts));
     break;
   }
-  return { seek, select: (previous + frame) / 2 - seek };
+  // `select` reads raw stream time (-copyts): where FFmpeg puts zero after a seek varies by container.
+  return { seek, select: (previous + frame) / 2 + startTicks * timeBase };
 }
 
 export async function extractVideoFrameToBuffer(
@@ -299,6 +301,7 @@ export async function extractVideoFrameToBuffer(
     const args = ["-hide_banner", "-loglevel", "error"];
     if (useVp9AlphaDecoder) args.push("-c:v", "libvpx-vp9");
     args.push(
+      "-copyts",
       "-ss",
       String(seek.seek),
       "-i",
