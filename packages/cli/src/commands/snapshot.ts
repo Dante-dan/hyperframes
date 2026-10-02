@@ -198,11 +198,17 @@ async function probeContainingSourceFrameSeek(
   // Without ffprobe, fall back to a plain seek: the first frame at or after `time`.
   if (!ffprobe) return { seek: time, select: 0 };
   // Packet timestamps need no decode, so a late sample costs a demux, not a decode from the start.
-  const probe = async (args: string[]): Promise<Record<string, unknown> | null> => {
+  const probe = async (
+    readIntervals: string,
+    entries: string,
+  ): Promise<Record<string, unknown> | null> => {
     try {
       const { stdout } = await runCancellableProcess(
         ffprobe,
-        ["-v", "error", "-select_streams", "v:0", ...args, "-of", "json", "--", videoPath],
+        [
+          ...["-v", "error", "-select_streams", "v:0", "-read_intervals", readIntervals],
+          ...["-show_entries", entries, "-of", "json", "--", videoPath],
+        ],
         { timeoutMs: FFMPEG_EXTRACT_TIMEOUT_MS, maxBufferBytes: 32 * 1024 * 1024 },
       );
       const parsed: unknown = JSON.parse(stdout);
@@ -214,10 +220,7 @@ async function probeContainingSourceFrameSeek(
       return null;
     }
   };
-  const data = await probe([
-    "-show_entries",
-    "stream=time_base,start_pts:format=start_time,duration",
-  ]);
+  const data = await probe("%+#1", "stream=time_base,start_pts:format=start_time,duration");
   if (data === null || !Array.isArray(data.streams)) return null;
   const stream: unknown = data.streams[0];
   if (
@@ -247,12 +250,7 @@ async function probeContainingSourceFrameSeek(
   const startTicks =
     Math.abs(startPts * timeBase - formatStart) <= 1e-6 ? startPts : formatStart / timeBase;
   // An absolute end: edit-list preroll packets start before the video, so a relative window can stop short.
-  const packetData = await probe([
-    "-read_intervals",
-    `%${startTicks * timeBase + time + 1}`,
-    "-show_entries",
-    "packet=pts,dts,flags",
-  ]);
+  const packetData = await probe(`%${startTicks * timeBase + time + 1}`, "packet=pts,dts,flags");
   if (packetData === null || !Array.isArray(packetData.packets)) return null;
   const packets: { pts: number; dts: number; key: boolean }[] = [];
   for (const packet of packetData.packets) {
