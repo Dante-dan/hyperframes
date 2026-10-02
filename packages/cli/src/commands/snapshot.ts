@@ -211,6 +211,7 @@ async function probeContainingSourceFrameSeek(
       "packet=pts,dts:stream=time_base:format=start_time,duration",
       "-of",
       "json",
+      "--",
       videoPath,
     ],
     { timeoutMs: FFMPEG_EXTRACT_TIMEOUT_MS, maxBufferBytes: 32 * 1024 * 1024 },
