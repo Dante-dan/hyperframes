@@ -180,7 +180,7 @@ export async function recaptureSnapshotComposite(page: SnapshotCompositePage): P
 export function containingSourceFrameIndex(timestamps: readonly number[], time: number): number {
   if (!Number.isFinite(time)) return -1;
   const tolerance = 16 * Number.EPSILON * Math.max(1, Math.abs(time));
-  let index = -1;
+  let index = timestamps.length > 0 ? 0 : -1;
   for (const [i, timestamp] of timestamps.entries()) {
     if (timestamp > time + tolerance) break;
     index = i;
@@ -188,7 +188,7 @@ export function containingSourceFrameIndex(timestamps: readonly number[], time: 
   return index;
 }
 
-/** Keyframe seek plus the decoded-time threshold that selects the frame containing `time`, or null. */
+/** Keyframe seek plus the source-timestamp threshold for the frame containing `time`, or null. */
 async function probeContainingSourceFrameSeek(
   videoPath: string,
   time: number,
@@ -269,7 +269,7 @@ async function probeContainingSourceFrameSeek(
   const previous = timestamps[index - 1] ?? frame - 0.001;
   // Demuxers seek by dts (fragmented MP4) or imprecisely (MPEG-TS), so seek to the last keyframe
   // at or before the frame in both orders (open-GOP leading frames precede their keyframe)
-  // and pick the frame by its decoded time.
+  // and select by original presentation timestamps, independent of decoded timeline rebasing.
   let seek = 0;
   for (let i = packets.findIndex((packet) => packet.pts === frame); i >= 0; i--) {
     const packet = packets[i]!;
@@ -277,7 +277,7 @@ async function probeContainingSourceFrameSeek(
     seek = Math.max(0, Math.min(packet.pts, packet.dts));
     break;
   }
-  return { seek, select: (previous + frame) / 2 - seek };
+  return { seek, select: (previous + frame) / 2 + startTicks * timeBase };
 }
 
 export async function extractVideoFrameToBuffer(
@@ -296,7 +296,7 @@ export async function extractVideoFrameToBuffer(
       holdLastFrame,
     );
     if (seek === null) return null;
-    const args = ["-hide_banner", "-loglevel", "error"];
+    const args = ["-hide_banner", "-loglevel", "error", "-copyts"];
     if (useVp9AlphaDecoder) args.push("-c:v", "libvpx-vp9");
     args.push(
       "-ss",

@@ -362,6 +362,11 @@ describe("containingSourceFrameIndex", () => {
     expect(containingSourceFrameIndex([0, 4.1], 4.1 - 4 * Number.EPSILON)).toBe(1);
     expect(containingSourceFrameIndex([0, 4.1], 4.1 - 0.00001)).toBe(0);
   });
+  it("holds the first available frame before video starts", () => {
+    expect(containingSourceFrameIndex([0.5, 0.6], 0)).toBe(0);
+    expect(containingSourceFrameIndex([], 0)).toBe(-1);
+    expect(containingSourceFrameIndex([0.5], NaN)).toBe(-1);
+  });
   it("uses irregular presentation intervals", () => {
     expect(containingSourceFrameIndex([0, 0.02, 0.08, 0.15], 0.07)).toBe(1);
     expect(containingSourceFrameIndex([0, 0.02, 0.08, 0.15], 0.08)).toBe(2);
@@ -490,6 +495,60 @@ describe("extractVideoFrameToBuffer", () => {
         ]);
         const actual = await extractVideoFrameToBuffer(clip, (index + 0.5) / 30);
         expect(actual?.equals(readFileSync(expected)), `frame ${index}`).toBe(true);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(!ffmpeg || !ffprobe).each([
+    ["audio-first MPEG-TS", "clip.ts", []],
+    ["late-video MP4", "clip.mp4", ["-vf", "setpts=PTS+0.5/TB", "-fps_mode", "passthrough"]],
+  ])("holds the first frame and selects containing frames in %s", async (_, name, videoArgs) => {
+    const dir = mkdtempSync(join(tmpdir(), "hf-snapshot-audio-first-"));
+    try {
+      const clip = join(dir, name);
+      const quiet = ["-hide_banner", "-loglevel", "error"];
+      execFileSync(ffmpeg!, [
+        ...quiet,
+        ...["-f", "lavfi", "-i", "testsrc2=d=3:r=30:s=160x90"],
+        ...["-f", "lavfi", "-i", "sine=d=3:r=44100"],
+        ...["-c:v", "libx264", "-bf", "0", "-g", "30", "-sc_threshold", "0"],
+        ...["-c:a", "aac", ...videoArgs, clip],
+      ]);
+      const starts = execFileSync(
+        ffprobe!,
+        [
+          ...["-v", "error", "-select_streams", "v:0"],
+          ...["-show_entries", "stream=start_time:format=start_time"],
+          ...["-of", "default=noprint_wrappers=1:nokey=1", clip],
+        ],
+        { encoding: "utf8" },
+      )
+        .trim()
+        .split("\n");
+      const lead = Number(starts[0]) - Number(starts.at(-1));
+      expect(lead).toBeGreaterThan(0.02);
+      for (const [time, index] of [
+        [0, 0],
+        [0.01, 0],
+        [0.05, 0],
+        [0.1, name === "clip.ts" ? 2 : 0],
+        [lead / 2, 0],
+        [lead + 0.02, 0],
+        [lead + 0.08, 2],
+        [lead + 0.11, 3],
+        [lead + 1.58, 47],
+      ] as const) {
+        const expected = join(dir, `frame-${index}.png`);
+        execFileSync(ffmpeg!, [
+          ...quiet,
+          ...["-i", clip, "-vf", `select=eq(n\\,${index})`, "-frames:v", "1", "-y", expected],
+        ]);
+        expect(
+          (await extractVideoFrameToBuffer(clip, time))?.equals(readFileSync(expected)),
+          `time ${time}, frame ${index}`,
+        ).toBe(true);
       }
     } finally {
       rmSync(dir, { recursive: true, force: true });
