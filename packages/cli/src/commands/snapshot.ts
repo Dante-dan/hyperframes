@@ -193,10 +193,10 @@ async function probeContainingSourceFrameSeek(
   videoPath: string,
   time: number,
   holdLastFrame: boolean,
-): Promise<{ seek: number; select: number } | null> {
+): Promise<{ seek?: number; select?: number } | null> {
   const ffprobe = findFFprobe();
   // Without ffprobe, fall back to a plain seek: the first frame at or after `time`.
-  if (!ffprobe) return { seek: time, select: 0 };
+  if (!ffprobe) return { seek: time };
   // Packet timestamps need no decode, so a late sample costs a demux, not a decode from the start.
   const probe = async (
     readIntervals: string,
@@ -272,14 +272,19 @@ async function probeContainingSourceFrameSeek(
   // at or before the frame in both orders (open-GOP leading frames precede their keyframe)
   // and pick the frame by its decoded time.
   let seek = 0;
+  let keyframe: number | undefined;
   for (let i = packets.findIndex((packet) => packet.pts === frame); i >= 0; i--) {
     const packet = packets[i]!;
     if (!packet.key || packet.pts > frame) continue;
-    seek = Math.max(0, Math.min(packet.pts, packet.dts));
+    seek = Math.max(0, packet.pts);
+    keyframe = packet.pts;
     break;
   }
-  // `select` reads raw stream time (-copyts): where FFmpeg puts zero after a seek varies by container.
-  return { seek, select: (previous + frame) / 2 + startTicks * timeBase };
+  // Where FFmpeg puts zero varies by container, so measure from the first frame the filter gets
+  // (`start_t`): the keyframe after a seek, else the first frame at or after the file start.
+  const first =
+    seek > 0 && keyframe !== undefined ? keyframe : (timestamps.find((t) => t >= 0) ?? frame);
+  return { seek: seek > 0 ? seek : undefined, select: (previous + frame) / 2 - first };
 }
 
 export async function extractVideoFrameToBuffer(
@@ -300,23 +305,10 @@ export async function extractVideoFrameToBuffer(
     if (seek === null) return null;
     const args = ["-hide_banner", "-loglevel", "error"];
     if (useVp9AlphaDecoder) args.push("-c:v", "libvpx-vp9");
-    args.push(
-      "-copyts",
-      "-ss",
-      String(seek.seek),
-      "-i",
-      videoPath,
-      "-map",
-      "0:v:0",
-      "-vf",
-      `select=gte(t\\,${seek.select})`,
-      "-frames:v",
-      "1",
-      "-q:v",
-      "2",
-      "-y",
-      outPath,
-    );
+    if (seek.seek !== undefined) args.push("-ss", String(seek.seek));
+    args.push("-i", videoPath, "-map", "0:v:0");
+    if (seek.select !== undefined) args.push("-vf", `select=gte(t-start_t\\,${seek.select})`);
+    args.push("-frames:v", "1", "-q:v", "2", "-y", outPath);
     const result = await runFfmpegOnce(ffmpegPath, args, FFMPEG_EXTRACT_TIMEOUT_MS);
     if (result.code !== 0 || result.timedOut || !existsSync(outPath)) return null;
     return readFileSync(outPath);
