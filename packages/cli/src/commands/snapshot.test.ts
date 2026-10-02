@@ -511,6 +511,34 @@ describe("extractVideoFrameToBuffer", () => {
     },
   );
 
+  it.skipIf(!ffmpeg || !ffprobe)(
+    "selects exact frame times in a fragmented MP4 whose start rounds down",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "hf-snapshot-start-"));
+      try {
+        // B-frames start this clip at 1024/12288 s, which ffprobe prints as 0.083333.
+        const clip = join(dir, "clip.mp4");
+        const quiet = ["-hide_banner", "-loglevel", "error"];
+        execFileSync(ffmpeg!, [
+          ...quiet,
+          ...["-f", "lavfi", "-i", "testsrc2=d=2:r=24:s=160x90", "-pix_fmt", "yuv420p"],
+          ...["-c:v", "libx264", "-bf", "3", "-movflags", "frag_keyframe+empty_moov", clip],
+        ]);
+        for (const index of [0, 1, 12, 47]) {
+          const expected = join(dir, `frame-${index}.png`);
+          execFileSync(ffmpeg!, [
+            ...quiet,
+            ...["-i", clip, "-vf", `select=eq(n\\,${index})`, "-frames:v", "1", "-y", expected],
+          ]);
+          const actual = await extractVideoFrameToBuffer(clip, index / 24);
+          expect(actual?.equals(readFileSync(expected)), `frame ${index}`).toBe(true);
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it.skipIf(!ffmpeg)("extracts without ffprobe, as before frame selection needed it", async () => {
     const dir = mkdtempSync(join(tmpdir(), "hf-snapshot-no-ffprobe-"));
     vi.stubEnv("HYPERFRAMES_FFPROBE_PATH", join(dir, "missing-ffprobe"));

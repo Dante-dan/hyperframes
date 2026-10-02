@@ -210,7 +210,7 @@ async function probeContainingSourceFrameSeek(
         "-read_intervals",
         `%+${time + 1}`,
         "-show_entries",
-        "packet=pts,dts,flags:stream=time_base:format=start_time,duration",
+        "packet=pts,dts,flags:stream=time_base,start_pts:format=start_time,duration",
         "-of",
         "json",
         "--",
@@ -253,7 +253,12 @@ async function probeContainingSourceFrameSeek(
       ? Number(format.duration)
       : NaN;
   if (!holdLastFrame && Number.isFinite(duration) && time >= duration) return null;
-  const offset = Number.isFinite(start) ? start : 0;
+  const formatStart = Number.isFinite(start) ? start : 0;
+  // format.start_time is rounded to microseconds; when the video sets it, use its exact start_pts.
+  const startPts =
+    "start_pts" in stream && typeof stream.start_pts === "number" ? stream.start_pts : NaN;
+  const startTicks =
+    Math.abs(startPts * timeBase - formatStart) <= 1e-6 ? startPts : formatStart / timeBase;
   const packets: { pts: number; dts: number; key: boolean }[] = [];
   for (const packet of data.packets) {
     if (typeof packet !== "object" || packet === null) return null;
@@ -261,7 +266,7 @@ async function probeContainingSourceFrameSeek(
     if (typeof pts !== "number") return null;
     const dts = "dts" in packet && typeof packet.dts === "number" ? packet.dts : pts;
     const key = "flags" in packet && typeof packet.flags === "string" && packet.flags.includes("K");
-    packets.push({ pts: pts * timeBase - offset, dts: dts * timeBase - offset, key });
+    packets.push({ pts: (pts - startTicks) * timeBase, dts: (dts - startTicks) * timeBase, key });
   }
   // Packets arrive in decode order; B-frames make that differ from presentation order.
   const timestamps = packets.map((packet) => packet.pts).sort((a, b) => a - b);
