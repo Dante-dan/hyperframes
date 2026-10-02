@@ -539,6 +539,36 @@ describe("extractVideoFrameToBuffer", () => {
     },
   );
 
+  it.skipIf(!ffmpeg || !ffprobe)(
+    "selects frames in a stream-copy trim whose preroll starts before the video",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "hf-snapshot-editlist-"));
+      try {
+        // The trim keeps 1.3 s of preroll packets before the first visible frame (an MP4 edit list).
+        const source = join(dir, "source.mp4");
+        const clip = join(dir, "clip.mp4");
+        const quiet = ["-hide_banner", "-loglevel", "error"];
+        execFileSync(ffmpeg!, [
+          ...quiet,
+          ...["-f", "lavfi", "-i", "testsrc2=d=4:r=24:s=160x90", "-pix_fmt", "yuv420p"],
+          ...["-c:v", "libx264", "-bf", "2", source],
+        ]);
+        execFileSync(ffmpeg!, [...quiet, "-ss", "1.3", "-i", source, "-c", "copy", clip]);
+        for (const index of [1, 3, 10, 30]) {
+          const expected = join(dir, `frame-${index}.png`);
+          execFileSync(ffmpeg!, [
+            ...quiet,
+            ...["-i", clip, "-vf", `select=eq(n\\,${index})`, "-frames:v", "1", "-y", expected],
+          ]);
+          const actual = await extractVideoFrameToBuffer(clip, index / 24);
+          expect(actual?.equals(readFileSync(expected)), `frame ${index}`).toBe(true);
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it.skipIf(!ffmpeg)("extracts without ffprobe, as before frame selection needed it", async () => {
     const dir = mkdtempSync(join(tmpdir(), "hf-snapshot-no-ffprobe-"));
     vi.stubEnv("HYPERFRAMES_FFPROBE_PATH", join(dir, "missing-ffprobe"));
