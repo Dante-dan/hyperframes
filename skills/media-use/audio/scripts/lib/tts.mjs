@@ -288,18 +288,9 @@ export async function synthesizeOne({
   }
   // kokoro — via the published CLI; --output is relative to the project dir.
   const wavRel = relTo(hyperframesDir, wavAbs);
-  const args = [
-    "hyperframes",
-    "tts",
-    writeTmpText(text),
-    "--voice",
-    voiceId,
-    "--speed",
-    String(speed),
-    "--output",
-    wavRel,
-  ];
+  const args = ["hyperframes", "tts", writeTmpText(text), "--voice", voiceId, "--output", wavRel];
   if (lang !== "en") args.push("--lang", lang);
+  if (speed !== 1) args.push("--speed", String(speed));
   const r = await spawnP("npx", args, { cwd: hyperframesDir });
   return synthResult(r, wavAbs, "kokoro (npx hyperframes tts)");
 }
