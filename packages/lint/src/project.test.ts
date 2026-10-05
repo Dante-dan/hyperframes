@@ -434,6 +434,63 @@ describe("template shell style sources", () => {
   });
 });
 
+describe("sub-composition stylesheets", () => {
+  it.each(["assets/fonts.css", "/assets/fonts.css", "assets/fonts.css?v=1#fonts"])(
+    "reads the shared project-root stylesheet %s from a nested template",
+    async (href) => {
+      const scene = validHtml("scene")
+        .replace(
+          "<html><body>",
+          `<html><body><template>
+          <link rel="stylesheet" href="${href}">
+          <style>#scene-title { font-family: 'Repro'; }</style>`,
+        )
+        .replace("</body>", "</template></body>");
+      const project = makeProject(validHtml());
+      mkdirSync(join(project, "compositions", "frames"), { recursive: true });
+      writeFileSync(join(project, "compositions", "frames", "scene.html"), scene);
+      mkdirSync(join(project, "assets"));
+      writeFileSync(join(project, "assets", "mask.svg"), "<svg></svg>");
+      writeFileSync(
+        join(project, "assets", "fonts.css"),
+        `@font-face { font-family: 'Repro'; src: local('Repro'); }
+         #scene-title { mask-image: url('mask.svg'); }`,
+      );
+
+      const { results } = await lintProject(project);
+      const findings = results.flatMap((entry) => entry.result.findings);
+      expect(findings.some((finding) => finding.code === "font_family_without_font_face")).toBe(
+        false,
+      );
+      expect(
+        findings.some((finding) => finding.code === "invalid_parent_traversal_in_asset_path"),
+      ).toBe(false);
+      expect(findings.some((finding) => finding.code === "texture_mask_asset_not_found")).toBe(
+        false,
+      );
+    },
+  );
+
+  it("still reads a stylesheet beside the sub-composition", async () => {
+    const scene = validHtml("scene").replace(
+      "<html><body>",
+      `<html><body><link rel="stylesheet" href="fonts.css">
+       <style>#scene-title { font-family: 'Repro'; }</style>`,
+    );
+    const project = makeProject(validHtml(), { "scene.html": scene });
+    writeFileSync(
+      join(project, "compositions", "fonts.css"),
+      "@font-face { font-family: 'Repro'; src: local('Repro'); }",
+    );
+
+    const { results } = await lintProject(project);
+    const findings = results.flatMap((entry) => entry.result.findings);
+    expect(findings.some((finding) => finding.code === "font_family_without_font_face")).toBe(
+      false,
+    );
+  });
+});
+
 describe("hevc_preview_codec", () => {
   interface ProbeStream {
     codec_name: string;

@@ -100,7 +100,9 @@ function collectLocalStylesheets(
     if (!rel.split(/\s+/).some((part) => part.toLowerCase() === "stylesheet")) continue;
     const href = link.getAttribute("href") ?? "";
     if (!isLocalStylesheetHref(href)) continue;
-    const rootRelative = compSrcPath ? join(dirname(compSrcPath), href) : href;
+    const rootRelative = compSrcPath
+      ? rewriteAssetPath(compSrcPath, href, (path) => existsSync(join(projectDir, path)))
+      : href;
     const stylesheet = resolveExistingLocalAsset(projectDir, rootRelative);
     if (!stylesheet) continue;
     styles.push({
