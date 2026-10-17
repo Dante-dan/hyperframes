@@ -11,16 +11,6 @@
 // document order. Transitions are NOT written here — the transitions injector
 // mutates this file afterward (data-start/duration/track-index + GSAP).
 //
-// Track lanes. Same-track time-overlap is this workflow's own assembly convention,
-// not a framework rule: the render never reads data-track-index, and no lint rule
-// checks overlap (timeline_track_too_dense counts elements per lane for readability).
-// The convention exists because the frame injector below ping-pongs 0/1 for overlaps:
-//   1      frame sub-comp clips (sequential; the injector 0/1-ping-pongs for overlaps)
-//   2      captions sub-comp clip (full-duration overlay, on top of frames)
-//   10     per-frame voice <audio>
-//   11     BGM <audio>
-//   20+i   SFX <audio> (one lane each)
-//
 // audio_meta.json contract (produced by audio.mjs; OPTIONAL — absent ⇒ silent
 // video, frames only). Durations come from STORYBOARD (audio sync-durations
 // writes them), NOT from here; this file carries only media PATHS, keyed by
@@ -34,7 +24,7 @@
 //         [--audio-meta audio_meta.json]. On disk: each built frame's src html,
 //         capture/{assets,assets/videos,screenshots}/<basename> for staging, compositions/captions.html.
 // Writes: <project>/index.html  +  stages assets/<basename>  +  (guard ① below)
-//         repairs a frame file in place when its root is missing data-width/height.
+//         repairs missing root dimensions and writes video-free <src>.assembled.html siblings.
 //
 // Pre-assembly frame guards (run in the same pass that reads each frame, so common
 // `lint` failures surface HERE instead of after assembly + a wasted render):
