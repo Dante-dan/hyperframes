@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// assemble-index.mjs — deterministic top-level index.html assembly for a
+// assemble-index.mjs — comment-length: assembly contract and track-lane protocol table.
+// Deterministic top-level index.html assembly for a
 // product-launch project. No subagent, no judgment: turns STORYBOARD.md + the
 // built frame files (+ optional audio_meta.json) into the standalone index.html
 // the renderer consumes, and stages the frame-named capture assets into assets/.
@@ -10,7 +11,17 @@
 // packages/core/docs/quickstart-template.html. Frame mount order = STORYBOARD
 // document order. Transitions are NOT written here — the transitions injector
 // mutates this file afterward (data-start/duration/track-index + GSAP).
-//
+
+// Track lanes. Same-track time-overlap is this workflow's own assembly convention,
+// not a framework rule: the render never reads data-track-index, and no lint rule
+// checks overlap (timeline_track_too_dense counts elements per lane for readability).
+// The convention exists because the frame injector below ping-pongs 0/1 for overlaps:
+//   1      frame sub-comp clips (sequential; the injector 0/1-ping-pongs for overlaps)
+//   2      captions sub-comp clip (full-duration overlay, on top of frames)
+//   10     per-frame voice <audio>
+//   11     BGM <audio>
+//   20+i   SFX <audio> (one lane each)
+
 // audio_meta.json contract (produced by audio.mjs; OPTIONAL — absent ⇒ silent
 // video, frames only). Durations come from STORYBOARD (audio sync-durations
 // writes them), NOT from here; this file carries only media PATHS, keyed by

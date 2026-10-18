@@ -243,3 +243,40 @@ test("does not hoist declarations hidden in comments or scripts", () => {
   assert.equal(result.status, 0, result.stderr);
   assert.doesNotMatch(readFileSync(join(project, "index.html"), "utf8"), /data-track-index="1001"/);
 });
+
+test("assemble then inject extends the approved-video mounted frame through the transition tail", () => {
+  const project = mkdtempSync(join(tmpdir(), "hf-frame-video-transition-"));
+  mkdirSync(join(project, "compositions"));
+  writeFileSync(
+    join(project, "STORYBOARD.md"),
+    "---\nformat: 16:9\n---\n\n## Frame 1\n- status: built\n- duration: 3s\n- src: compositions/frame-01.html\n\n## Frame 2\n- status: built\n- duration: 3s\n- transition_in: crossfade 0.5s\n- src: compositions/frame-02.html\n",
+  );
+  for (const id of ["frame-01", "frame-02"]) {
+    writeFileSync(
+      join(project, "compositions", `${id}.html`),
+      `<div data-composition-id="${id}" data-width="1920" data-height="1080" data-duration="3"><div class="clip" data-start="0" data-duration="3" data-track-index="0"></div>${id === "frame-01" ? '<video class="clip" data-frame-video="approved" data-frame-video-x="0" data-frame-video-y="0" data-frame-video-width="1920" data-frame-video-height="1080" src="https://cdn.example/clip.mp4" data-start="0" data-duration="3" data-track-index="1"></video>' : ""}</div>`,
+    );
+  }
+  const assemble = spawnSync(
+    process.execPath,
+    [join(skillDir, "scripts", "assemble-index.mjs"), "--hyperframes", project],
+    { encoding: "utf8" },
+  );
+  assert.equal(assemble.status, 0, assemble.stderr);
+  const index = readFileSync(join(project, "index.html"), "utf8");
+  const mountedSrc = index.match(/data-composition-src="([^"]+)"/)[1];
+  assert.equal(mountedSrc, "compositions/frame-01.html.assembled.html");
+  const inject = spawnSync(
+    process.execPath,
+    [join(skillDir, "scripts", "transitions.mjs"), "inject", "--hyperframes", project],
+    { encoding: "utf8" },
+  );
+  assert.equal(inject.status, 0, inject.stderr);
+  for (const src of [mountedSrc, "compositions/frame-01.html"]) {
+    const html = readFileSync(join(project, src), "utf8");
+    assert.match(html, /data-composition-id="frame-01"[^>]*data-duration="3\.5"/);
+    assert.match(html, /<div class="clip"[^>]*data-duration="3\.5"/);
+  }
+  assert.match(readFileSync(join(project, "compositions/frame-01.html"), "utf8"), /<video\b/);
+  assert.doesNotMatch(readFileSync(join(project, mountedSrc), "utf8"), /<video\b/);
+});
