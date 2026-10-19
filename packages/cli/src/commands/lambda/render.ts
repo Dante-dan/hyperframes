@@ -11,7 +11,7 @@ import type {
   DistributedFormat,
   SerializableDistributedRenderConfig,
 } from "@hyperframes/aws-lambda/sdk";
-import type { CanvasResolution } from "@hyperframes/core";
+import type { CanvasResolution, DistributedFps } from "@hyperframes/core";
 import { c } from "../../ui/colors.js";
 import {
   reportVariableIssues,
@@ -32,7 +32,7 @@ export interface RenderArgs {
   stackName: string;
   siteId?: string;
   /** Composition config — fps/width/height/format required, rest optional. */
-  fps: 24 | 30 | 60;
+  fps: DistributedFps;
   width: number;
   height: number;
   /**
@@ -124,7 +124,11 @@ export async function runRender(args: RenderArgs): Promise<void> {
     }
   }
 
-  const config: SerializableDistributedRenderConfig = buildLambdaRenderConfig(args, variables);
+  const config: SerializableDistributedRenderConfig = buildLambdaRenderConfig(
+    args,
+    variables,
+    stack.reservedConcurrency,
+  );
 
   // When the caller passes only --site-id, synthesise the minimum-shape
   // SiteHandle pointing at the deterministic content-addressed key. The
@@ -190,12 +194,17 @@ async function waitForCompletion(
   // Lazy import to avoid pulling SFN client when only `render --no-wait` is used.
   const { getRenderProgress } = await loadSDK();
   let lastRendered = -1;
+  const warned = new Set<string>();
   while (true) {
     const progress = await getRenderProgress({
       executionArn,
       region: stack.region,
       defaultMemorySizeMb: stack.lambdaMemoryMb,
     });
+    for (const warning of progress.warnings) {
+      if (!warned.has(warning)) console.warn(c.warn(warning));
+      warned.add(warning);
+    }
     if (!json && progress.framesRendered !== lastRendered) {
       lastRendered = progress.framesRendered;
       const total = progress.totalFrames ?? "?";
@@ -241,6 +250,7 @@ function sleep(ms: number): Promise<void> {
 export function buildLambdaRenderConfig(
   args: RenderArgs,
   variables: Record<string, unknown> | undefined,
+  workerConcurrency?: number,
 ): SerializableDistributedRenderConfig {
   const config: SerializableDistributedRenderConfig = {
     fps: args.fps,
@@ -253,6 +263,7 @@ export function buildLambdaRenderConfig(
     chunkSize: args.chunkSize,
     maxParallelChunks: args.maxParallelChunks,
     targetChunkFrames: args.targetChunkFrames,
+    workerConcurrency,
     runtimeCap: "lambda",
     variables,
   };

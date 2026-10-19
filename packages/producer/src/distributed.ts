@@ -48,6 +48,8 @@ export {
   PLAN_DIR_SIZE_LIMIT_BYTES,
   PLAN_PROJECT_DIR_SKIP_SEGMENTS,
   // Error codes + classes
+  CHUNK_EXCEEDS_WORKER_TIMEOUT,
+  ChunkExceedsWorkerTimeoutError,
   FORMAT_NOT_SUPPORTED_IN_DISTRIBUTED,
   FormatNotSupportedInDistributedError,
   PLAN_TOO_LARGE,
@@ -103,7 +105,18 @@ export {
 } from "./services/distributed/renderChunk.js";
 
 // ── Assemble (Activity C) ───────────────────────────────────────────────────
-export { assemble, type AssembleResult } from "./services/distributed/assemble.js";
+export {
+  assemble,
+  chunksAreStitchedMp4,
+  type AssembleResult,
+} from "./services/distributed/assemble.js";
+export { muxChunkWithAudio } from "./services/distributed/chunkAudio.js";
+export {
+  buildStitchedHeader,
+  readMp4Layout,
+  type Mp4Layout,
+  type ReadRange,
+} from "./services/distributed/mp4Stitch.js";
 
 // ── Cloud-agnostic adapter helpers ──────────────────────────────────────────
 // Shared by the distributed-render adapters (aws-lambda, gcp-cloud-run, …) so
