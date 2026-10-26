@@ -219,6 +219,8 @@ npx hyperframes render --docker --output output.mp4
 
 The render compiler removes equivalent top-level `@font-face` declarations from active, unconditional styles before embedding local font files. The last equivalent declaration stays in place, preserving its order relative to other font faces. Conditional rules and alternate styles are retained. Source scene files are unchanged.
 
+Only identical declarations with the same family, `src`, and descriptors are merged. If the export is still large, make repeated scene font rules match exactly or declare them once in a shared root style.
+
 ### Every render takes about 45 seconds longer than expected
 
 A composition that never registers a GSAP timeline still makes the producer wait

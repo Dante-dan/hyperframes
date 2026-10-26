@@ -68,7 +68,7 @@ export {
   AFTER_FONTS_SCRIPT_TYPE,
   compositionStyle,
   cssStyleMergeKey,
-  UNCONDITIONAL_CSS_KEY,
+  isAlwaysAppliedStyle,
   deferScriptsUntilFonts,
   headStyleRuns,
   inlineScriptRuns,
