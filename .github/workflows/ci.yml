@@ -1,4 +1,4 @@
-name: HDR review validation (fork only)
+name: HDR regression base and merge comparison (fork only)
 on:
   workflow_dispatch:
 permissions:
@@ -12,6 +12,9 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          repository: heygen-com/hyperframes
+          ref: 7555024250ea93aabda0ae53cfa432b9c50e526c
+          fetch-depth: 0
           lfs: true
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
         with:
@@ -19,39 +22,36 @@ jobs:
           buildkitd-config-inline: |
             [registry."docker.io"]
               mirrors = ["mirror.gcr.io"]
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
-        timeout-minutes: 20
-        with:
-          context: .
-          file: Dockerfile.test
-          load: true
-          tags: hyperframes-producer:test
-          cache-from: type=gha,scope=regression-test-image
-      - name: Capture provenance and run existing engine tests
+      - name: Compare exact failing merge with its base using repository harness
         shell: bash
         run: |
-          mkdir -p hdr-validation
-          git rev-parse HEAD > hdr-validation/source-sha.txt
-          sha256sum Dockerfile.test > hdr-validation/dockerfile-sha256.txt
-          docker image inspect hyperframes-producer:test --format '{{.Id}}' > hdr-validation/image-id.txt
-          docker run --rm --security-opt seccomp=unconfined --shm-size=4g -e HYPERFRAMES_NO_TELEMETRY=1 --entrypoint sh -w /app hyperframes-producer:test -c 'bun run --cwd packages/engine test src/services/videoFrameInjector.test.ts src/services/screenshotService.test.ts src/services/videoFrameInjector-hdrLayers.browser.test.ts src/utils/layerCompositor.test.ts src/utils/hdrCompositing.test.ts --reporter verbose' 2>&1 | tee hdr-validation/engine-tests.txt
-      - name: Regenerate HLG golden with official harness
-        shell: bash
-        run: |
-          docker run --rm --security-opt seccomp=unconfined --shm-size=4g -e HYPERFRAMES_NO_TELEMETRY=1 -v "${{ github.workspace }}/packages/producer/tests:/app/packages/producer/tests" hyperframes-producer:test --update hdr-hlg-regression 2>&1 | tee hdr-validation/golden-update.txt
-      - name: Verify regenerated golden twice
-        shell: bash
-        run: |
-          for attempt in 1 2; do
-            docker run --rm --security-opt seccomp=unconfined --shm-size=4g -e HYPERFRAMES_NO_TELEMETRY=1 -v "${{ github.workspace }}/packages/producer/tests:/app/packages/producer/tests" hyperframes-producer:test hdr-hlg-regression 2>&1 | tee "hdr-validation/golden-verify-${attempt}.txt"
+          mkdir -p "$RUNNER_TEMP/hdr-validation"
+          result=0
+          for revision in d1b3471325bc7a9b080ef317afe7c462e54613c3 7555024250ea93aabda0ae53cfa432b9c50e526c; do
+            git checkout "$revision"
+            git lfs checkout
+            evidence="$RUNNER_TEMP/hdr-validation/$revision"
+            mkdir -p "$evidence"
+            git rev-parse HEAD > "$evidence/source-sha.txt"
+            sha256sum Dockerfile.test packages/producer/tests/hdr-regression/output/output.mp4 > "$evidence/input-sha256.txt"
+            docker buildx build --load --tag hyperframes-producer:test --file Dockerfile.test . 2>&1 | tee "$evidence/build.txt"
+            docker image inspect hyperframes-producer:test --format '{{.Id}}' > "$evidence/image-id.txt"
+            set +e
+            docker run --rm --security-opt seccomp=unconfined --shm-size=4g -e HYPERFRAMES_NO_TELEMETRY=1 -v "$PWD/packages/producer/tests:/app/packages/producer/tests" hyperframes-producer:test --mode=in-process hdr-regression 2>&1 | tee "$evidence/regression.txt"
+            status=${PIPESTATUS[0]}
+            set -e
+            echo "$status" > "$evidence/exit-code.txt"
+            if [ "$status" -ne 0 ]; then result=1; fi
+            if [ -d packages/producer/tests/hdr-regression/failures ]; then
+              cp -R packages/producer/tests/hdr-regression/failures "$evidence/"
+              rm -r packages/producer/tests/hdr-regression/failures
+            fi
+            sha256sum packages/producer/tests/hdr-regression/output/output.mp4 > "$evidence/golden-after-sha256.txt"
           done
-          docker run --rm --entrypoint ffprobe -v "${{ github.workspace }}/packages/producer/tests:/app/packages/producer/tests" hyperframes-producer:test -v error -count_frames -show_streams -of json /app/packages/producer/tests/hdr-hlg-regression/output/output.mp4 > hdr-validation/ffprobe.json
+          exit "$result"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: hdr-review-validation
-          path: |
-            hdr-validation/
-            packages/producer/tests/hdr-hlg-regression/output/
-            packages/producer/tests/hdr-hlg-regression/failures/
+          name: hdr-regression-base-merge-comparison
+          path: ${{ runner.temp }}/hdr-validation/
           if-no-files-found: error
