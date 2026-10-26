@@ -1,4 +1,4 @@
-name: HDR regression base and merge comparison (fork only)
+name: HDR regression scene-mask diagnosis (fork only)
 on:
   workflow_dispatch:
 permissions:
@@ -33,6 +33,29 @@ jobs:
             evidence="$RUNNER_TEMP/hdr-validation/$revision"
             mkdir -p "$evidence"
             git rev-parse HEAD > "$evidence/source-sha.txt"
+            python3 - <<'PY'
+          from pathlib import Path
+          path = Path('packages/producer/src/services/render/stages/captureHdrFrameShared.ts')
+          source = path.read_text()
+          marker = '  const domPng = await timeHdrPhaseAsync(hdrPerf, "domScreenshotMs", () =>'
+          diagnostic = '''  if (frameIdx >= 170) {
+            log.info("[DEBUG-hf6433] transition scene mask", {
+              frameIdx, time, sceneIds: [...sceneIds], showIds, hideIds,
+              stacking: stackingInfo.map(({id, isHdr, opacity, visible, renderFrameVisible, zIndex}) =>
+                ({id, isHdr, opacity, visible, renderFrameVisible, zIndex})),
+              maskedDom: await session.page.evaluate(() =>
+                [...document.querySelectorAll("[id], [data-hf-render-id]")].filter((node) =>
+                  !["SCRIPT", "STYLE", "LINK", "META"].includes(node.tagName)).map((node) => ({
+                    id: node.id, renderId: node.getAttribute("data-hf-render-id"),
+                    visibility: getComputedStyle(node).visibility,
+                    opacity: getComputedStyle(node).opacity,
+                  }))),
+            });
+          }
+          '''
+          assert source.count(marker) == 1
+          path.write_text(source.replace(marker, diagnostic + marker))
+          PY
             sha256sum Dockerfile.test packages/producer/tests/hdr-regression/output/output.mp4 > "$evidence/input-sha256.txt"
             docker buildx build --load --tag hyperframes-producer:test --file Dockerfile.test . 2>&1 | tee "$evidence/build.txt"
             docker image inspect hyperframes-producer:test --format '{{.Id}}' > "$evidence/image-id.txt"
@@ -47,6 +70,7 @@ jobs:
               rm -r packages/producer/tests/hdr-regression/failures
             fi
             sha256sum packages/producer/tests/hdr-regression/output/output.mp4 > "$evidence/golden-after-sha256.txt"
+            git restore packages/producer/src/services/render/stages/captureHdrFrameShared.ts
           done
           exit "$result"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
