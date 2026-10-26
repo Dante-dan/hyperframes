@@ -516,7 +516,7 @@ export async function applyDomLayerMask(
       for (const id of args.hide) {
         const el = window.__hfMediaEl?.(id) ?? document.getElementById(id);
         if (el) {
-          const shownSubtrees = shownElements.filter((shown) => el.contains(shown));
+          const shownSubtrees = shownElements.filter((shown) => shown !== el && el.contains(shown));
           for (const node of [el, ...el.querySelectorAll("*")]) {
             if (!(node instanceof HTMLElement) && !(node instanceof SVGElement)) continue;
             if (shownSubtrees.some((shown) => shown.contains(node))) continue;

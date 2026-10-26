@@ -892,7 +892,7 @@ describe("video-frame injection respects ancestor visibility", () => {
   });
 
   it.each([false, true])(
-    "hides a promoted subtree but keeps explicitly shown descendants with render identity=%s",
+    "hides a selected subtree but keeps explicitly shown descendants with render identity=%s",
     async (renderIdentity) => {
       const { window, document } = parseHTML(`<html><head></head><body>
       <div id="root" data-start="0">
@@ -921,7 +921,7 @@ describe("video-frame injection respects ancestor visibility", () => {
       try {
         window.__hfMediaEl = (id: string) =>
           document.querySelector(`[data-hf-render-id="${id}"]`) ?? document.getElementById(id);
-        await applyDomLayerMask(passthroughPage(), ["root", "kept"], ["overlay"]);
+        await applyDomLayerMask(passthroughPage(), ["root", "overlay", "kept"], ["overlay"]);
         expect(overlay.style.visibility).toBe("hidden");
         expect(label.style.visibility).toBe("hidden");
         expect(svg.style.visibility).toBe("hidden");
