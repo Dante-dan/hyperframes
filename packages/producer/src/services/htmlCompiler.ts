@@ -56,8 +56,7 @@ import {
   readDeclaredDefaults,
   parseHostVariableValues,
   headStyleRuns,
-  cssStyleMergeKey,
-  UNCONDITIONAL_CSS_KEY,
+  isAlwaysAppliedStyle,
   dedupeFontFaceRules,
   inlineScriptRuns,
   parsesAsScript,
@@ -942,10 +941,7 @@ function coalesceHeadStylesAndBodyScripts(html: string): string {
   const body = document.querySelector("body");
   if (!head && !body) return html;
 
-  const liveStyles = [...document.querySelectorAll("style")].filter(
-    (el) =>
-      cssStyleMergeKey(el) === UNCONDITIONAL_CSS_KEY && !el.closest("template, noscript, svg"),
-  );
+  const liveStyles = [...document.querySelectorAll("style")].filter(isAlwaysAppliedStyle);
   const dedupedStyles = dedupeFontFaceRules(liveStyles.map((el) => el.textContent || ""));
   liveStyles.forEach((el, i) => {
     el.textContent = dedupedStyles[i] ?? "";
